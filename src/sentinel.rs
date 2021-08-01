@@ -39,9 +39,8 @@
 //!     .expire(key, 60).ignore()
 //!     .query(&mut connection).unwrap();
 //! ```
-use std::collections::HashSet;
-use std::ops::Div;
-use std::thread;
+
+use std::borrow::BorrowMut;
 /*
  # Step 1: connecting to the first Sentinel
    + 1. iterate over sentinenls and find working sentinel to connection (timeout: a few hundreds of milliseconds)
@@ -51,34 +50,36 @@ use std::thread;
  # Step 2: ask for master address and slaves
    + 1. `SENTINEL get-master-addr-by-name master-name`
    + 2. If an ip:port pair is received, this address should be used to connect to the Redis master.
-   +- 3. if a null reply is received, the client should try the next Sentinel in the list.
-    4. `SENTINEL replicas $master-name`
+   + 3. if a null reply is received, the client should try the next Sentinel in the list.
+   + 4. `SENTINEL replicas $master-name`
 
  # Step 3: call the ROLE command in the target instance
    + 1. call the ROLE command in order to verify the role of the instance is actually a master.
-   +/- 2. If the instance is not a master as expected, the client should wait (timeout: a few hundreds of milliseconds) and should try again starting from Step 1
+   + 2. If the instance is not a master as expected, the client should wait (timeout: a few hundreds of milliseconds) and should try again starting from Step 1
 
 
  # Handling reconnections
-   1. client should resolve again the address using Sentinels restarting from Step
-      - If the client reconnects after a timeout or socket error.
-      - If the client reconnects because it was explicitly closed or reconnected by the user.
-      - or any other case where the client lost the connection with the Redis server
+    ## client should resolve again the address using Sentinels restarting from Step
+        1. If the client reconnects after a timeout or socket error.
+        2. If the client reconnects because it was explicitly closed or reconnected by the user.
+        3 or any other case where the client lost the connection with the Redis server
 
  # Connection pools
    1. all the existing connections should be closed and connected to the new address.
 
  # Error reporting
-   1. If **no Sentinel** can be contacted an error that clearly states that **Redis Sentinel is unreachable** should be returned.
-   2. If all the Sentinels in the pool replied with **a null reply**, the user should be informed with an error that **Sentinels don't know this master name**.
+   +/+ 1. If **no Sentinel** can be contacted an error that clearly states that **Redis Sentinel is unreachable** should be returned. //FIXME
+   + 2. If all the Sentinels in the pool replied with **a null reply**, the user should be informed with an error that **Sentinels don't know this master name**.
 
  # Sentinels list automatic refresh (Optional)
-   1. Obtain a list of other Sentinels for this master using the command `SENTINEL sentinels <master-name>`.
-   2. Add every ip:port pair not already existing in our list at the end of the list
+   + 1. Obtain a list of other Sentinels for this master using the command `SENTINEL sentinels <master-name>`.
+   + 2. Add every ip:port pair not already existing in our list at the end of the list
 
  # Subscribe to Sentinel events to improve responsiveness (TODO)
 */
 use std::cell::RefCell;
+use std::ops::Div;
+use std::thread;
 use std::{collections::HashMap, time::Duration};
 
 #[cfg(feature = "aio")]
@@ -101,6 +102,8 @@ pub struct SentinelClient {
     replica_nodes: Vec<ConnectionInfo>,
     master_verification_timeout: RefCell<Option<Duration>>,
     connection_timeout: RefCell<Option<Duration>>,
+    /// if is true will not allow read queries to be asked from master while there is no replica available
+    read_only: RefCell<bool>,
 }
 
 /// The client acts as connector to the sentinel and redis servers.  By itself it does not
@@ -140,6 +143,7 @@ impl SentinelClient {
             replica_nodes: vec![],
             master_verification_timeout: RefCell::new(Some(SENTINEL_TIMEOUT)),
             connection_timeout: RefCell::new(Some(SENTINEL_TIMEOUT.div(4))),
+            read_only: RefCell::new(false),
         };
 
         client.update_nodes()?;
@@ -147,9 +151,68 @@ impl SentinelClient {
         Ok(client)
     }
 
+    /// will return a connection to master node
+    /// all write and commands should be sent to this connection
+    pub fn get_write_connection(&self) -> RedisResult<Connection> {
+        let conn_info = self.master_node.as_ref().ok_or_else(|| {
+            RedisError::from((
+                ErrorKind::InvalidClientConfig,
+                "Master Connection failer",
+                "master connection generateion failer".to_string(),
+            ))
+        })?;
+
+        connect(&conn_info, None)
+    }
+    /// will return a connection to one of replica nodes
+    /// all reading should come from this connection
+    /// # Errors
+    /// 1. if there is no replica connectable and read_only flag is true it will eror out
+    /// otherwize if `read_only` is false will try connecting master node
+    pub fn get_read_connection(&mut self) -> RedisResult<Connection> {
+        // let conn_info=self.master_node.as_ref().ok_or_else(||RedisError::from((
+        //     ErrorKind::InvalidClientConfig,
+        //     "Master Connection failer",
+        //     "master connection generateion failer".to_string()
+        // )))?;
+
+        for (idx, replica_conn_info) in self.replica_nodes.iter().enumerate() {
+            if let Ok(conn) = connect(&replica_conn_info, None) {
+                let replicas: &mut Vec<ConnectionInfo> = self.replica_nodes.borrow_mut();
+                let connected_node = replicas.remove(idx);
+                replicas.push(connected_node);
+                return Ok(conn);
+            }
+        }
+
+        if *self.read_only.borrow() {
+            return Err(RedisError::from((
+                ErrorKind::ReadOnly,
+                "Replica Node not found",
+                "master connection generateion failer".to_string(),
+            )));
+        }
+
+        let conn_info = self.master_node.as_ref().ok_or_else(|| {
+            RedisError::from((
+                ErrorKind::InvalidClientConfig,
+                "Master Connection failer",
+                "master connection generateion failer".to_string(),
+            ))
+        })?;
+        connect(&conn_info, None)
+    }
+
+    /// will set read_only flag on allowing master to be queried or not
+    pub fn set_read_only(&mut self, state: bool) -> RedisResult<()> {
+        let mut current = self.read_only.borrow_mut();
+        *current = state;
+        Ok(())
+    }
+
     /// will add newly discoverd sentinel nodes to clients sentinel nods vector
     /// and will ignore duplicated discoverd nodes
-    pub fn add_sentinel_nodes(&mut self, new_nodes: Vec<ConnectionInfo>) -> RedisResult<()> {
+    fn add_sentinel_nodes(&mut self, new_nodes: Vec<ConnectionInfo>) -> RedisResult<()> {
         let mut latest_nodes = self.sentinel_nodes.clone();
         latest_nodes.extend(new_nodes.into_iter());
         latest_nodes.dedup();
@@ -160,7 +223,7 @@ impl SentinelClient {
 
     /// will add newly discoverd replica nodes to clients replica nodes vector
     /// and will ignore duplicated discoverd nodes
-    pub fn add_replica_nodes(&mut self, new_nodes: Vec<ConnectionInfo>) -> RedisResult<()> {
+    fn add_replica_nodes(&mut self, new_nodes: Vec<ConnectionInfo>) -> RedisResult<()> {
         let mut latest_nodes = self.replica_nodes.clone();
         latest_nodes.extend(new_nodes.into_iter());
         latest_nodes.dedup();
@@ -247,14 +310,14 @@ impl SentinelClient {
     ///
     /// see step 3 of: https://redis.io/topics/sentinel-clients
     fn verify_master_node(&self, master_conn: &ConnectionInfo) -> RedisResult<Connection> {
-        let mut conn = connect(master_conn, None)?;
+        let mut conn = connect(&"redis://127.0.0.1:6379".into_connection_info()?, None)?;
+        // let mut conn = connect(master_conn, None)?;
 
         let retries = 3;
         for _ in 0_i32..retries {
             let role: crate::Value = crate::cmd("ROLE").query(&mut conn)?;
             // ROLE returns a complex response, so we cannot use the usual type-casting
             if let crate::Value::Bulk(values) = role {
-
                 if values
                     .get(0)
                     .unwrap()
@@ -267,7 +330,10 @@ impl SentinelClient {
                     );
                     continue;
                 } else {
-                    println!("[+] GOT MASTER {:?}, on {:?}", self.master_group_name, values);
+                    println!(
+                        "[+] GOT MASTER {:?}, on {:?}",
+                        self.master_group_name, values
+                    );
                     return Ok(conn);
                 }
             }
@@ -368,7 +434,7 @@ mod test {
         )
         .unwrap();
 
-        println!("\n\ngot client with \n{:?}\n",client)
+        println!("\n\ngot client with \n{:?}\n", client)
         // client.
         //   assert!(sentinel::new(("fe80::cafe:beef%eno1", 6379)).is_ok());
     }
