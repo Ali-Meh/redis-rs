@@ -90,7 +90,7 @@ impl fmt::Display for ConnectionAddr {
 }
 
 /// Holds the connection information that redis should use for connecting.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConnectionInfo {
     /// A connection address for where to connect to.
     pub addr: ConnectionAddr,
@@ -100,7 +100,7 @@ pub struct ConnectionInfo {
 }
 
 /// Redis specific/connection independent information used to establish a connection to redis.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RedisConnectionInfo {
     /// The database number to use.  This is usually `0`.
     pub db: i64,
