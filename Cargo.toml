@@ -59,7 +59,7 @@ tokio-native-tls = { version = "0.3", optional = true }
 async-native-tls = { version = "0.3", optional = true }
 
 [features]
-default = ["acl", "streams", "geospatial", "script"]
+default = ["acl", "streams", "geospatial", "script", "sentinel"]
 acl = []
 aio = ["bytes", "pin-project-lite", "futures-util", "futures-util/sink", "tokio/io-util", "tokio-util", "tokio-util/codec", "tokio/sync", "combine/tokio"]
 geospatial = []
@@ -101,6 +101,7 @@ required-features = ["aio"]
 
 [[test]]
 name = "test_acl"
+
 
 [[bench]]
 name = "bench_basic"

@@ -1,44 +1,32 @@
-//FIXME
-//! Redis cluster support.
+//! Redis sentinel support.
 //!
-//! This module extends the library to be able to use cluster.
-//! ClusterClient implements traits of ConnectionLike and Commands.
+//! This module extends the library to be able to use sentinel clusters.
+//! SentinelClient implements traits of ConnectionLike and Commands.
 //!
-//! Note that the cluster support currently does not provide pubsub
+//! Note that the sentinel support currently does not provide pubsub
 //! functionality.
 //!
 //! # Example
 //! ```rust,no_run
 //! use redis::Commands;
-//! use redis::cluster::ClusterClient;
+//! use redis::sentinel::SentinelClient;
 //!
-//! let nodes = vec!["redis://127.0.0.1:6379/", "redis://127.0.0.1:6378/", "redis://127.0.0.1:6377/"];
-//! let client = ClusterClient::open(nodes).unwrap();
-//! let mut connection = client.get_connection().unwrap();
+//! let sentinels = vec!["redis://10.96.251.40:26379/", "redis://10.96.112.86:26379/", "redis://10.106.176.167:26379/"];
+//! let client = SentinelClient::new(sentinels,"mymaster".to_string()).unwrap();
+//! let mut connection = client.get_write_connection().unwrap();
 //!
 //! let _: () = connection.set("test", "test_data").unwrap();
 //! let rv: String = connection.get("test").unwrap();
 //!
 //! assert_eq!(rv, "test_data");
 //! ```
-//!
-//! # Pipelining
-//! ```rust,no_run
-//! use redis::Commands;
-//! use redis::cluster::{cluster_pipe, ClusterClient};
-//!
-//! let nodes = vec!["redis://127.0.0.1:6379/", "redis://127.0.0.1:6378/", "redis://127.0.0.1:6377/"];
-//! let client = ClusterClient::open(nodes).unwrap();
-//! let mut connection = client.get_connection().unwrap();
-//!
-//! let key = "test";
-//!
-//! let _: () = cluster_pipe()
-//!     .rpush(key, "123").ignore()
-//!     .ltrim(key, -10, -1).ignore()
-//!     .expire(key, 60).ignore()
-//!     .query(&mut connection).unwrap();
-//! ```
+
+
+/*
+// let nodes = vec!["redis://127.0.0.1:6379/", "redis://127.0.0.1:6378/", "redis://127.0.0.1:6377/"];
+*/
+
+
 
 use std::borrow::BorrowMut;
 /*
@@ -119,7 +107,7 @@ pub struct SentinelClient {
 /// Example usage::
 ///
 /// ```rust,no_run
-/// let client = redis::sentinel::SentinelClient::open(vec!["redis://127.0.0.1/"],"mymaster".to_string()).unwrap();
+/// let client = redis::sentinel::SentinelClient::new(vec!["redis://10.96.251.40:26379/"],"mymaster".to_string()).unwrap();
 /// let con = client.get_write_connection().unwrap();
 /// ```
 impl SentinelClient {
@@ -244,9 +232,9 @@ impl SentinelClient {
                         get_master_from_sentinel(&self.master_group_name, &mut conn)
                     {
                         //check if it's null continue with next sentinel
-                        println!(
-                            "[+] get_master_from_sentinel => conn_info : {:?}",
-                            master_conn_info
+                        dbg!(
+                            "[+] get_master_from_sentinel :",
+                            &master_conn_info
                         );
 
                         //Get connecting to master and verify
@@ -272,8 +260,8 @@ impl SentinelClient {
 
                             return Ok(());
                         } else {
-                            eprintln!(
-                                "[-] continue on master verification fail: {:?}",
+                            dbg!(
+                                "[-] continue on master verification fail:",
                                 master_conn_info
                             );
                             // continue on master verification fail
@@ -281,15 +269,15 @@ impl SentinelClient {
                         }
                     } else {
                         // continue on master name not present in sentinel node
-                        eprintln!(
-                            "[-] continue on master name not present in sentinel node: {:?}",
+                        dbg!(
+                            "[-] continue on master name not present in sentinel node: ",
                             sen
                         );
                         continue;
                     }
                 }
                 Err(e) => {
-                    eprintln!("[-] continue on unreachable host: {:?}", e);
+                    dbg!("[-] continue on unreachable host: ", e);
                     continue;
                 }
             };
@@ -310,8 +298,7 @@ impl SentinelClient {
     ///
     /// see step 3 of: https://redis.io/topics/sentinel-clients
     fn verify_master_node(&self, master_conn: &ConnectionInfo) -> RedisResult<Connection> {
-        let mut conn = connect(&"redis://127.0.0.1:6379".into_connection_info()?, None)?;
-        // let mut conn = connect(master_conn, None)?;
+        let mut conn = connect(master_conn, None)?;
 
         let retries = 3;
         for _ in 0_i32..retries {
@@ -323,16 +310,16 @@ impl SentinelClient {
                     .unwrap()
                     .ne(&crate::Value::Data("master".into()))
                 {
-                    println!("[!] Retring to verify master on {:?}", values);
+                    dbg!("[!] Retring to verify master on {:?}", values);
                     thread::sleep(
                         (*self.master_verification_timeout.borrow())
                             .unwrap_or_else(|| Duration::from_millis(1)),
                     );
                     continue;
                 } else {
-                    println!(
+                    dbg!(
                         "[+] GOT MASTER {:?}, on {:?}",
-                        self.master_group_name, values
+                        &self.master_group_name, values
                     );
                     return Ok(conn);
                 }
@@ -434,7 +421,7 @@ mod test {
         )
         .unwrap();
 
-        println!("\n\ngot client with \n{:?}\n", client)
+        dbg!("\n\ngot client with \n{:?}\n", client);
         // client.
         //   assert!(sentinel::new(("fe80::cafe:beef%eno1", 6379)).is_ok());
     }
