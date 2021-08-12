@@ -11,7 +11,7 @@
 //! use redis::Commands;
 //! use redis::sentinel::SentinelClient;
 //!
-//! let sentinels = vec!["redis://10.96.251.40:26379/", "redis://10.96.112.86:26379/", "redis://10.106.176.167:26379/"];
+//! let sentinels = vec!["redis://127.0.0.1:26379/", "redis://127.0.0.2:26379/", "redis://127.0.0.3:26379/"];
 //! let client = SentinelClient::new(sentinels,"mymaster".to_string()).unwrap();
 //! let mut connection = client.get_write_connection().unwrap();
 //!
@@ -20,11 +20,6 @@
 //!
 //! assert_eq!(rv, "test_data");
 //! ```
-
-
-/*
-// let nodes = vec!["redis://127.0.0.1:6379/", "redis://127.0.0.1:6378/", "redis://127.0.0.1:6377/"];
-*/
 
 
 
@@ -107,7 +102,7 @@ pub struct SentinelClient {
 /// Example usage::
 ///
 /// ```rust,no_run
-/// let client = redis::sentinel::SentinelClient::new(vec!["redis://10.96.251.40:26379/"],"mymaster".to_string()).unwrap();
+/// let client = redis::sentinel::SentinelClient::new(vec!["redis://127.0.0.1:26379/"],"mymaster".to_string()).unwrap();
 /// let con = client.get_write_connection().unwrap();
 /// ```
 impl SentinelClient {
